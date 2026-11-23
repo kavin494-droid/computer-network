@@ -1,0 +1,103 @@
+server.py
+# server.py - TCP and UDP server (same port number, two different transports)
+import socket, threading, argparse, random, datetime
+def now():
+return datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+def log(line):
+print(f"{now()} {line}", flush=True)
+def tcp_handler(conn, addr):
+log(f"[TCP] Connection ESTABLISHED with {addr[0]}:{addr[1]}")
+with conn:
+while True:
+data = conn.recv(1024)
+if not data:
+break
+cid, seq, msg = data.decode().split("|", 2)
+log(f"[TCP] {cid} seq={seq} received: {msg}")
+conn.sendall(f"ACK|{cid}|{seq}|Server got: {msg}".encode())
+log(f"[TCP] Connection CLOSED with {addr[0]}:{addr[1]}")
+def tcp_server(host, port):
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM) # SOCK_STREAM = TCP
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((host, port))
+s.listen(10) # waiting queue for handshakes
+log(f"[TCP] Server listening on {host}:{port}")
+while True:
+conn, addr = s.accept() # 3-way handshake completes here
+threading.Thread(target=tcp_handler, args=(conn, addr), daemon=True).start()
+def udp_server(host, port, loss):
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # SOCK_DGRAM = UDP
+s.bind((host, port))
+log(f"[UDP] Server listening on {host}:{port} (simulated loss = {loss*100:.0f}%)")
+while True:
+data, addr = s.recvfrom(1024) # no connection, no handshake
+if random.random() < loss: # emulate a lossy network
+continue # datagram silently dropped
+cid, seq, msg = data.decode().split("|", 2)
+log(f"[UDP] {cid} seq={seq} datagram from {addr[0]}:{addr[1]}: {msg}")
+s.sendto(f"ACK|{cid}|{seq}|Server got: {msg}".encode(), addr)
+if __name__ == "__main__":
+p = argparse.ArgumentParser()
+p.add_argument("--host", default="127.0.0.1")
+p.add_argument("--port", type=int, default=5000)
+p.add_argument("--loss", type=float, default=0.0, help="UDP loss probability 0..1")
+a = p.parse_args()
+threading.Thread(target=tcp_server, args=(a.host, a.port), daemon=True).start()
+udp_server(a.host, a.port, a.loss)
+
+TCP and UDP Client-Server Communication System - Page 4
+
+client.py
+# client.py - client with protocol selection (TCP / UDP)
+import socket, time, argparse, statistics
+def run_client(cid, ip, port, proto, message, count, timeout=0.3, verbose=True):
+rows, sent, acked = [], 0, 0
+def out(s):
+if verbose: print(s, flush=True)
+out(f"[{cid}] Server={ip}:{port} Protocol={proto}")
+t_total = time.perf_counter()
+conn_ms = 0.0
+if proto == "TCP":
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+t0 = time.perf_counter()
+s.connect((ip, port)) # 3-way handshake
+conn_ms = (time.perf_counter() - t0) * 1000
+out(f"[{cid}] Connection Status: CONNECTED (handshake {conn_ms:.3f} ms)")
+else:
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+out(f"[{cid}] Connection Status: CONNECTIONLESS (no handshake)")
+s.settimeout(timeout)
+for seq in range(1, count + 1):
+payload = f"{cid}|{seq}|{message}".encode()
+t0 = time.perf_counter()
+sent += 1
+try:
+if proto == "TCP":
+s.sendall(payload)
+reply = s.recv(1024)
+else:
+s.sendto(payload, (ip, port))
+reply, _ = s.recvfrom(1024)
+ms = (time.perf_counter() - t0) * 1000
+acked += 1
+rows.append(ms)
+out(f"[{cid}] seq={seq} Sent='{message}' Received='{reply.decode().split('|',3)[3]}' "
+f"Time={ms:.3f} ms Ack=RECEIVED")
+except socket.timeout:
+out(f"[{cid}] seq={seq} Sent='{message}' Received=- Time={timeout*1000:.0f} ms+ Ack=NOT RECEIVED (lost)")
+total = time.perf_counter() - t_total
+s.close()
+return dict(client=cid, proto=proto, sent=sent, acked=acked, conn_ms=conn_ms,
+avg=statistics.mean(rows) if rows else 0, mn=min(rows) if rows else 0,
+mx=max(rows) if rows else 0, total_s=total)
+if __name__ == "__main__":
+p = argparse.ArgumentParser()
+p.add_argument("--id", default="C1")
+p.add_argument("--ip", default="127.0.0.1")
+p.add_argument("--port", type=int, default=5000)
+p.add_argument("--proto", choices=["TCP", "UDP"], default="TCP")
+p.add_argument("--msg", default="Hello Server")
+p.add_argument("--count", type=int, default=5)
+a = p.parse_args()
+r = run_client(a.id, a.ip, a.port, a.proto, a.msg, a.count)
+print(f"Summary: sent={r['sent']} acked={r['acked']} avg={r['avg']:.3f} ms")
